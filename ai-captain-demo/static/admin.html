@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI 大促队长 · 后台管理</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #0a0e1a; color: #dbe4ff; min-height: 100vh;
+  }
+  header { display: flex; align-items: center; gap: 12px; padding: 16px 20px; border-bottom: 1px solid #1e2a4a; background: #0d1326; }
+  header h1 { font-size: 18px; letter-spacing: 1px; }
+  .badge { font-size: 12px; padding: 2px 10px; border-radius: 10px; background: #26324e; color: #8fb3ff; }
+  .container { display: flex; min-height: calc(100vh - 60px); }
+  aside { width: 160px; border-right: 1px solid #1e2a4a; background: #0d1326; flex-shrink: 0; }
+  aside button {
+    width: 100%; text-align: left; padding: 14px 18px; background: transparent; border: none;
+    color: #8c9cc5; cursor: pointer; font-size: 14px;
+  }
+  aside button.active { color: #fff; background: #1f3c88; }
+  main { flex: 1; padding: 20px; overflow-y: auto; }
+  .tab { display: none; }
+  .tab.active { display: block; }
+  h2 { font-size: 16px; margin-bottom: 14px; color: #ffd666; }
+  .card {
+    background: #111830; border: 1px solid #1e2a4a; border-radius: 12px;
+    padding: 16px; margin-bottom: 14px;
+  }
+  .grid2 { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+  .stat { text-align: center; }
+  .stat .num { font-size: 28px; color: #2fdc7e; }
+  .stat .label { font-size: 12px; color: #6b7ba3; margin-top: 4px; }
+  button.action {
+    background: #1f3c88; border: none; color: #fff; border-radius: 8px;
+    padding: 8px 14px; font-size: 14px; cursor: pointer;
+  }
+  button.action:hover { background: #2a4cae; }
+  button.danger { background: #7a1f2b; }
+  button.danger:hover { background: #a32a3a; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid #1e2a4a; }
+  th { color: #8fb3ff; font-weight: normal; }
+  input, select, textarea {
+    background: #0c1226; border: 1px solid #2a3a63; color: #dbe4ff;
+    border-radius: 6px; padding: 8px 10px; font-size: 13px; outline: none;
+  }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+  .hint { font-size: 12px; color: #55648a; margin-top: 6px; }
+  .event { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: #5f6f95; border-bottom: 1px solid #1e2a4a; padding: 6px 0; }
+  .event b { color: #8fb3ff; font-weight: normal; margin-right: 6px; }
+  #adminCam { width: 200px; border-radius: 8px; background: #000; transform: scaleX(-1); }
+</style>
+</head>
+<body>
+<header>
+  <h1>AI 大促队长 · 后台管理</h1>
+  <span id="connBadge" class="badge">连接中</span>
+  <button class="action danger" onclick="hush()">一键静音</button>
+  <a href="/" style="color:#8fb3ff;font-size:13px;margin-left:auto">← 前台对讲</a>
+</header>
+<div class="container">
+  <aside id="nav"></aside>
+  <main>
+    <!-- 总览 -->
+    <div class="tab active" id="tab-overview">
+      <h2>链路状态</h2>
+      <div class="grid2" id="stateCards"></div>
+      <div class="card">
+        <div class="row"><b>当前身份：</b><span id="ovIdentity">未识别</span></div>
+        <div class="row"><b>收音模式：</b><span id="ovMode">-</span> · 声纹锁：<span id="ovVp">-</span></div>
+      </div>
+      <h2>最近事件</h2>
+      <div class="card" id="eventsBox"><div class="hint">加载中…</div></div>
+    </div>
+
+    <!-- 人员 -->
+    <div class="tab" id="tab-members">
+      <h2>成员列表</h2>
+      <div class="card">
+        <div class="row">
+          <input id="newName" placeholder="姓名" />
+          <button class="action" onclick="addMember()">添加成员</button>
+        </div>
+        <table id="membersTable"><tbody></tbody></table>
+      </div>
+      <h2>人脸 5 姿态注册</h2>
+      <div class="card">
+        <div class="row">
+          <select id="regMember"></select>
+          <select id="regPose">
+            <option value="front">正面</option>
+            <option value="left">左转</option>
+            <option value="right">右转</option>
+            <option value="up">微仰</option>
+            <option value="down">微俯</option>
+          </select>
+          <button class="action" id="camBtn" onclick="startRegCam()">开启摄像头</button>
+          <button class="action" onclick="captureFace()">拍照注册</button>
+        </div>
+        <video id="adminCam" autoplay muted playsinline></video>
+        <canvas id="adminCanvas" style="display:none"></canvas>
+        <div class="hint" id="regHint">未开启摄像头</div>
+      </div>
+      <h2>声纹 3 句注册</h2>
+      <div class="card">
+        <div class="row">
+          <select id="vpMember"></select>
+          <button class="action" id="vpBtn" onclick="recordVp()">按住录音</button>
+        </div>
+        <div class="hint">按住按钮读任意 2-3 秒中文，松开上传。系统只保存声纹向量。</div>
+      </div>
+    </div>
+
+    <!-- 值班表 -->
+    <div class="tab" id="tab-roster">
+      <h2>值班表</h2>
+      <div class="card">
+        <div class="row">
+          <input id="rTeam" placeholder="组" />
+          <input id="rTask" placeholder="任务" style="flex:1" />
+          <input id="rOwner" placeholder="负责人" />
+          <input id="rBackup" placeholder="backup" />
+          <button class="action" onclick="addRoster()">添加</button>
+        </div>
+        <table id="rosterTable"><tbody></tbody></table>
+      </div>
+    </div>
+
+    <!-- 声音 -->
+    <div class="tab" id="tab-sound">
+      <h2>收音与声纹</h2>
+      <div class="card">
+        <div class="row"><label>收音模式</label>
+          <select id="sMode" onchange="saveSettings()">
+            <option value="ptt">PTT 按住说话</option>
+            <option value="voiceprint">声纹锁持续监听</option>
+            <option value="hybrid">声纹+唤醒词</option>
+          </select>
+        </div>
+        <div class="row"><label>声纹开关</label>
+          <select id="sVp" onchange="saveSettings()">
+            <option value="false">关</option>
+            <option value="true">开</option>
+          </select>
+        </div>
+        <div class="row"><label>声纹阈值</label><input id="sVpTh" type="number" step="0.05" min="0" max="1" onchange="saveSettings()"/></div>
+        <div class="row"><label>TTS 引擎</label>
+          <select id="sTts" onchange="saveSettings()">
+            <option value="melo">vits-melo（低延迟）</option>
+            <option value="kokoro">kokoro（多音色）</option>
+          </select>
+        </div>
+        <div class="row"><label>kokoro 音色</label>
+          <select id="sVoice" onchange="saveSettings()">
+            <option value="af">af</option><option value="af_bella">af_bella</option><option value="af_nicole">af_nicole</option><option value="af_sky">af_sky</option>
+            <option value="am_adam">am_adam</option><option value="am_michael">am_michael</option><option value="bf_emma">bf_emma</option><option value="bf_isabella">bf_isabella</option>
+          </select>
+        </div>
+        <div class="row"><label>语速</label><input id="sSpeed" type="number" step="0.1" min="0.5" max="2" onchange="saveSettings()"/></div>
+      </div>
+    </div>
+
+    <!-- 台本 -->
+    <div class="tab" id="tab-playbook">
+      <h2>台本播报</h2>
+      <div class="card">
+        <div class="row">
+          <input id="pbText" placeholder="播报文本" style="flex:1" />
+          <input id="pbCron" placeholder="cron 如 0 0 * * *" />
+          <button class="action" onclick="addPlaybook()">添加</button>
+          <button class="action" onclick="generateAllPb()">全部预生成音频</button>
+        </div>
+        <table id="pbTable"><tbody></tbody></table>
+      </div>
+    </div>
+
+    <!-- 模型 -->
+    <div class="tab" id="tab-model">
+      <h2>LLM Provider</h2>
+      <div class="card">
+        <div class="row"><label>名称</label><input id="mName" /></div>
+        <div class="row"><label>base_url</label><input id="mUrl" style="flex:1" /></div>
+        <div class="row"><label>model</label><input id="mModel" /></div>
+        <div class="row"><label>api_key</label><input id="mKey" type="password" style="flex:1" placeholder="留空则保持原值"/></div>
+        <div class="row"><label>超时(ms)</label><input id="mTimeout" type="number" /></div>
+        <button class="action" onclick="saveProvider()">保存</button>
+        <button class="action" onclick="testProvider()">连通性测试</button>
+        <div class="hint" id="mHint"></div>
+      </div>
+    </div>
+
+    <!-- 对话与技能 -->
+    <div class="tab" id="tab-skills">
+      <h2>人格 / System Prompt</h2>
+      <div class="card">
+        <div class="row"><input id="pName" placeholder="人格名" /></div>
+        <textarea id="pPrompt" rows="6" style="width:100%;resize:vertical" placeholder="System prompt..."></textarea>
+        <div class="row"><button class="action" onclick="savePersona()">保存</button></div>
+      </div>
+      <h2>意图规则表（正则 → 模板）</h2>
+      <div class="card">
+        <div class="row">
+          <input id="iName" placeholder="名称" />
+          <input id="iPattern" placeholder="正则，如 支付.*成功率" style="flex:1" />
+          <input id="iPriority" type="number" value="0" style="width:60px" />
+        </div>
+        <div class="row">
+          <input id="iTemplate" placeholder="回复模板，可用 {identity}" style="flex:1" />
+          <button class="action" onclick="addIntent()">添加</button>
+        </div>
+        <table id="intentsTable"><tbody></tbody></table>
+      </div>
+      <h2>意图测试</h2>
+      <div class="card">
+        <div class="row"><input id="testText" placeholder="输入测试问句" style="flex:1" /><button class="action" onclick="testIntent()">测试匹配</button></div>
+        <pre id="testResult" style="margin-top:10px;font-size:13px;color:#8fb3ff"></pre>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const tabs = [
+  { id: 'overview', label: '① 总览' },
+  { id: 'members', label: '④ 人员' },
+  { id: 'roster', label: '⑤ 值班表' },
+  { id: 'sound', label: '③ 声音' },
+  { id: 'playbook', label: '⑥ 台本' },
+  { id: 'model', label: '⑦ 模型' },
+  { id: 'skills', label: '② 对话' },
+];
+let settings = {}, state = {};
+
+async function loadIntents() {
+  const rows = await getJSON('/api/intents');
+  const html = rows.map(r => `<tr>
+    <td><input value="${esc(r.name)}" onchange="upIntent(${r.id},'name',this.value)"/></td>
+    <td><input value="${esc(r.pattern)}" style="width:100%" onchange="upIntent(${r.id},'pattern',this.value)"/></td>
+    <td><input value="${esc(r.template)}" style="width:100%" onchange="upIntent(${r.id},'template',this.value)"/></td>
+    <td><input type="number" value="${r.priority}" style="width:60px" onchange="upIntent(${r.id},'priority',this.value)"/></td>
+    <td><button class="action danger" onclick="delIntent(${r.id})">删除</button></td>
+  </tr>`).join('');
+  $('intentsTable').innerHTML = `<thead><tr><th>名称</th><th>正则</th><th>模板</th><th>优先级</th><th></th></tr></thead><tbody>${html || '<tr><td colspan=5 class="hint">暂无规则</td></tr>'}</tbody>`;
+}
+async function addIntent() {
+  await postJSON('/api/intents', { name: $('iName').value, pattern: $('iPattern').value, template: $('iTemplate').value, priority: Number($('iPriority').value) });
+  $('iName').value=$('iPattern').value=$('iTemplate').value=''; $('iPriority').value=0;
+  loadIntents();
+}
+async function upIntent(id, k, v) {
+  await postJSON(`/api/intents/${id}`, { [k]: v });
+  loadIntents();
+}
+async function delIntent(id) { if(confirm('删除？')) { await fetch(`/api/intents/${id}`, { method:'DELETE' }); loadIntents(); } }
+async function testIntent() {
+  const r = await postJSON('/api/intents/test', { text: $('testText').value });
+  $('testResult').textContent = JSON.stringify(r, null, 2);
+}
+
+function initNav() {
+  $('nav').innerHTML = tabs.map((t, i) =>
+    `<button class="${i===0?'active':''}" onclick="showTab('${t.id}',this)">${t.label}</button>`
+  ).join('');
+}
+function showTab(id, btn) {
+  document.querySelectorAll('.tab').forEach(e => e.classList.remove('active'));
+  document.querySelectorAll('#nav button').forEach(e => e.classList.remove('active'));
+  $(`tab-${id}`).classList.add('active');
+  btn.classList.add('active');
+  if (id === 'members') loadMembers();
+  if (id === 'roster') loadRoster();
+  if (id === 'playbook') loadPlaybook();
+}
+
+async function getJSON(path) { return fetch(path).then(r => r.json()); }
+async function postJSON(path, body) { return fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r=>r.json()); }
+
+async function loadState() {
+  state = await getJSON('/api/state');
+  $('connBadge').textContent = state.mock ? 'MOCK' : '真机';
+  renderState();
+  loadEvents();
+}
+function renderState() {
+  const cards = [
+    { label: 'ASR', num: state.asr ? 'OK' : '关' },
+    { label: 'TTS', num: state.tts_mode || '关' },
+    { label: '声纹', num: state.voiceprint ? (state.voiceprint_enabled ? '开' : '备') : '关' },
+    { label: '人脸', num: state.face ? 'OK' : '关' },
+    { label: '在线客户端', num: state.clients },
+    { label: '已注册人脸', num: (state.registered_faces || []).length },
+  ];
+  $('stateCards').innerHTML = cards.map(c => `<div class="card stat"><div class="num">${c.num}</div><div class="label">${c.label}</div></div>`).join('');
+  $('ovIdentity').textContent = state.identity || '未识别';
+  $('ovMode').textContent = state.audio_mode;
+  $('ovVp').textContent = state.voiceprint_enabled ? '开' : '关';
+}
+
+async function loadEvents() {
+  try {
+    const evs = await getJSON('/api/events?n=30');
+    const html = evs.slice().reverse().map(e => `<div class="event"><b>${new Date(e.ts*1000).toLocaleTimeString('zh-CN')}</b> ${e.dir || ''} ${e.type || ''} ${esc(e.text || '').slice(0,60)}</div>`).join('');
+    $('eventsBox').innerHTML = html || '<div class="hint">暂无事件</div>';
+  } catch (e) {
+    $('eventsBox').innerHTML = '<div class="hint">读取事件失败</div>';
+  }
+}
+
+// settings
+async function loadSettings() {
+  settings = await getJSON('/api/settings');
+  $('sMode').value = settings.audio_mode || 'ptt';
+  $('sVp').value = settings.voiceprint_enabled || 'false';
+  $('sVpTh').value = settings.voiceprint_threshold || 0.55;
+  $('sTts').value = settings.tts_engine || 'melo';
+  $('sVoice').value = settings.tts_kokoro_voice || 'af';
+  $('sSpeed').value = settings.tts_speed || 1.0;
+}
+async function saveSettings() {
+  await postJSON('/api/settings', {
+    audio_mode: $('sMode').value,
+    voiceprint_enabled: $('sVp').value,
+    voiceprint_threshold: $('sVpTh').value,
+    tts_engine: $('sTts').value,
+    tts_kokoro_voice: $('sVoice').value,
+    tts_speed: $('sSpeed').value,
+  });
+  loadState();
+}
+
+function storeGet(k) { return settings[k] || ''; }
+
+// members
+async function loadMembers() {
+  const members = await getJSON('/api/members');
+  const html = members.map(m => {
+    const faceInfo = m.face.map((f, i) => `${f.pose || i}:${f.q != null ? f.q.toFixed(2) : '?'}`).join('，');
+    return `<tr><td>${m.name}</td><td>${m.face.length} 张 · ${faceInfo || '无'}</td><td>${m.voiceprint ? '已注册' : '未注册'}</td><td><button class="action danger" onclick="delMember(${m.id})">删除</button></td></tr>`;
+  }).join('');
+  $('membersTable').innerHTML = `<thead><tr><th>姓名</th><th>人脸</th><th>声纹</th><th></th></tr></thead><tbody>${html || '<tr><td colspan=4 class="hint">暂无成员</td></tr>'}</tbody>`;
+  const opts = members.map(m => `<option value="${m.name}" data-id="${m.id}">${m.name}</option>`).join();
+  $('regMember').innerHTML = opts;
+  $('vpMember').innerHTML = opts;
+}
+async function addMember() {
+  const name = $('newName').value.trim();
+  if (!name) return alert('填姓名');
+  await postJSON('/api/members', { name });
+  $('newName').value = '';
+  loadMembers();
+}
+async function delMember(id) {
+  if (!confirm('确定删除？')) return;
+  await fetch(`/api/members/${id}`, { method: 'DELETE' });
+  loadMembers();
+}
+
+let regStream = null;
+async function startRegCam() {
+  regStream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+  $('adminCam').srcObject = regStream;
+  $('camBtn').textContent = '已开启';
+  $('regHint').textContent = '摄像头已开启，选姿态后按「拍照注册」。';
+}
+function captureFace() {
+  const v = $('adminCam');
+  if (!v.videoWidth) return alert('先开启摄像头');
+  const c = $('adminCanvas');
+  const w = 480, h = Math.round(v.videoHeight / v.videoWidth * 480);
+  c.width = w; c.height = h;
+  c.getContext('2d').drawImage(v, 0, 0, w, h);
+  const img = c.toDataURL('image/jpeg', 0.7).split(',')[1];
+  const id = $('regMember').selectedOptions[0].dataset.id;
+  postJSON(`/api/members/${id}/face`, { img, pose: $('regPose').value }).then(r => {
+    $('regHint').textContent = r.ok ? `注册成功：质量 ${r.quality}` : `注册失败：${r.error}`;
+    loadMembers();
+  });
+}
+
+// voiceprint recording (simple PCM wav via ScriptProcessor)
+let vpCtx, vpRecorder, vpBuf = [];
+async function recordVp() {
+  if (vpCtx) { stopVp(); return; }
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: 16000, channelCount: 1 } });
+  vpCtx = new AudioContext({ sampleRate: 16000 });
+  const src = vpCtx.createMediaStreamSource(stream);
+  vpRecorder = vpCtx.createScriptProcessor(4096, 1, 1);
+  vpBuf = [];
+  vpRecorder.onaudioprocess = e => {
+    const f = e.inputBuffer.getChannelData(0);
+    vpBuf.push(new Float32Array(f));
+  };
+  src.connect(vpRecorder);
+  vpRecorder.connect(vpCtx.destination);
+  $('vpBtn').textContent = '录音中…松开上传';
+}
+function stopVp() {
+  const total = vpBuf.reduce((a, b) => a + b.length, 0);
+  const all = new Float32Array(total);
+  let off = 0;
+  vpBuf.forEach(b => { all.set(b, off); off += b.length; });
+  // encode wav
+  const samples = new Int16Array(all.length);
+  for (let i = 0; i < all.length; i++) {
+    const s = Math.max(-1, Math.min(1, all[i]));
+    samples[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+  const buf = new ArrayBuffer(44 + samples.byteLength);
+  const v = new DataView(buf);
+  const writeStr = (o, s) => { for (let i=0;i<s.length;i++) v.setUint8(o+i, s.charCodeAt(i)); };
+  writeStr(0, 'RIFF'); v.setUint32(4, 36 + samples.byteLength, true); writeStr(8, 'WAVE');
+  writeStr(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, 16000, true); v.setUint32(28, 32000, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  writeStr(36, 'data'); v.setUint32(40, samples.byteLength, true);
+  for (let i=0;i<samples.length;i++) v.setInt16(44+i*2, samples[i], true);
+  const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
+  const id = $('vpMember').selectedOptions[0].dataset.id;
+  postJSON(`/api/members/${id}/voiceprint`, { wav: b64 }).then(r => {
+    $('vpBtn').textContent = '按住录音';
+    alert(r.ok ? '声纹注册成功' : `失败：${r.error || 'unknown'}`);
+    loadMembers();
+  });
+  vpCtx.close(); vpCtx = null; vpBuf = [];
+}
+$('vpBtn').addEventListener('mouseup', stopVp);
+$('vpBtn').addEventListener('mouseleave', stopVp);
+$('vpBtn').addEventListener('touchend', stopVp);
+
+// roster
+async function loadRoster() {
+  const rows = await getJSON('/api/roster');
+  const html = rows.map(r => `<tr>
+    <td><input value="${esc(r.team)}" onchange="upRoster(${r.id},'team',this.value)"/></td>
+    <td><input value="${esc(r.task)}" style="width:100%" onchange="upRoster(${r.id},'task',this.value)"/></td>
+    <td><input value="${esc(r.owner)}" onchange="upRoster(${r.id},'owner',this.value)"/></td>
+    <td><input value="${esc(r.backup)}" onchange="upRoster(${r.id},'backup',this.value)"/></td>
+    <td><input type="number" value="${r.progress}" min=0 max=100 onchange="upRoster(${r.id},'progress',this.value)"/></td>
+    <td><input value="${esc(r.status)}" onchange="upRoster(${r.id},'status',this.value)"/></td>
+    <td><button class="action danger" onclick="delRoster(${r.id})">删除</button></td>
+  </tr>`).join('');
+  $('rosterTable').innerHTML = `<thead><tr><th>组</th><th>任务</th><th>负责人</th><th>backup</th><th>进度</th><th>状态</th><th></th></tr></thead><tbody>${html || '<tr><td colspan=7 class="hint">暂无值班任务</td></tr>'}</tbody>`;
+}
+async function addRoster() {
+  const body = { team: $('rTeam').value, task: $('rTask').value, owner: $('rOwner').value, backup: $('rBackup').value };
+  await postJSON('/api/roster', body);
+  $('rTeam').value = $('rTask').value = $('rOwner').value = $('rBackup').value = '';
+  loadRoster();
+}
+async function upRoster(id, k, v) { await postJSON(`/api/roster/${id}`, { [k]: v }); }
+async function delRoster(id) { if(confirm('删除？')) { await fetch(`/api/roster/${id}`, { method: 'DELETE' }); loadRoster(); } }
+
+// playbook
+async function loadPlaybook() {
+  const rows = await getJSON('/api/playbook');
+  const html = rows.map(r => `<tr><td>${esc(r.text)}</td><td>${esc(r.cron)}</td><td>${r.enabled ? '启用' : '停用'}</td><td><button class="action danger" onclick="delPb(${r.id})">删除</button></td></tr>`).join('');
+  $('pbTable').innerHTML = `<thead><tr><th>文本</th><th>cron</th><th>状态</th><th></th></tr></thead><tbody>${html || '<tr><td colspan=4 class="hint">暂无台本</td></tr>'}</tbody>`;
+}
+async function addPlaybook() { await postJSON('/api/playbook', { text: $('pbText').value, cron: $('pbCron').value }); $('pbText').value=$('pbCron').value=''; loadPlaybook(); }
+async function generateAllPb() {
+  const r = await postJSON('/api/playbook/generate-all', {});
+  alert(r.ok ? `批量预生成完成：${r.results.map(x=>x.ok?'成功':'失败').join('/')}` : '失败');
+  loadPlaybook();
+}
+async function delPb(id) { await fetch(`/api/playbook/${id}`, { method: 'DELETE' }); loadPlaybook(); }
+
+// model provider
+async function loadProvider() {
+  const p = await getJSON('/api/provider');
+  $('mName').value = p.name || ''; $('mUrl').value = p.base_url || ''; $('mModel').value = p.model || ''; $('mTimeout').value = p.timeout_ms || 1500;
+}
+async function saveProvider() {
+  const body = { name: $('mName').value, base_url: $('mUrl').value, model: $('mModel').value, api_key: $('mKey').value, timeout_ms: Number($('mTimeout').value), is_default: true };
+  await postJSON('/api/provider', body);
+  $('mHint').textContent = '已保存。连通性测试需要 LLM 薄循环触发时自动进行。';
+}
+
+// persona
+async function loadPersonas() {
+  const ps = await getJSON('/api/personas');
+  const p = ps[0] || {};
+  $('pName').value = p.name || ''; $('pPrompt').value = p.system_prompt || '';
+}
+async function testProvider() {
+  $('mHint').textContent = '测试中…';
+  const r = await postJSON('/api/provider/test', {});
+  $('mHint').textContent = r.ok ? `连通 OK，延迟 ${r.latency_ms}ms` : `失败：${r.error}`;
+  $('mHint').style.color = r.ok ? '#2fdc7e' : '#ff7875';
+}
+
+async function savePersona() {
+  await postJSON('/api/personas', { name: $('pName').value, system_prompt: $('pPrompt').value, is_default: true });
+  alert('保存成功');
+}
+
+function hush() { fetch('/api/hush', { method: 'POST' }); }
+function esc(s) { return (s || '').replace(/[<>&"']/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c])); }
+
+initNav();
+loadSettings();
+loadState();
+loadProvider();
+loadPersonas();
+setInterval(loadState, 3000);
+</script>
+</body>
+</html>

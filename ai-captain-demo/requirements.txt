@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+websockets
+opencv-python-headless
+numpy
+sherpa-onnx
+huggingface_hub
+apscheduler
+openai

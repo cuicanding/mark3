@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI 大促队长 · POC</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #0a0e1a; color: #dbe4ff; min-height: 100vh; padding: 20px;
+  }
+  header { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
+  header h1 { font-size: 20px; letter-spacing: 2px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: #666; }
+  .dot.on { background: #2fdc7e; box-shadow: 0 0 8px #2fdc7e; }
+  .badge {
+    font-size: 12px; padding: 2px 10px; border-radius: 10px;
+    background: #26324e; color: #8fb3ff;
+  }
+  .grid { display: grid; grid-template-columns: 1fr 340px; gap: 16px; max-width: 1200px; margin: 0 auto; }
+  .card {
+    background: #111830; border: 1px solid #1e2a4a; border-radius: 12px;
+    padding: 16px; margin-bottom: 14px;
+  }
+  .card .label { font-size: 12px; color: #6b7ba3; margin-bottom: 6px; }
+  #subtitle {
+    font-size: 26px; line-height: 1.5; color: #ffd666; min-height: 80px;
+    text-shadow: 0 2px 12px rgba(255, 214, 102, .25);
+  }
+  #asr { font-size: 17px; color: #8fb3ff; min-height: 26px; }
+  #who { font-size: 17px; color: #2fdc7e; }
+  .row { display: flex; gap: 8px; }
+  input[type=text] {
+    flex: 1; background: #0c1226; border: 1px solid #2a3a63; color: #dbe4ff;
+    border-radius: 8px; padding: 10px 12px; font-size: 15px; outline: none;
+  }
+  button {
+    background: #1f3c88; border: none; color: #fff; border-radius: 8px;
+    padding: 10px 16px; font-size: 15px; cursor: pointer; white-space: nowrap;
+  }
+  button:hover { background: #2a4cae; }
+  button.danger { background: #7a1f2b; }
+  button.danger:hover { background: #a32a3a; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  #cam { width: 100%; border-radius: 8px; background: #000; transform: scaleX(-1); }
+  #wave { width: 100%; height: 56px; background: #0c1226; border-radius: 8px; }
+  #log {
+    font-size: 12px; color: #5f6f95; height: 180px; overflow-y: auto;
+    font-family: ui-monospace, Menlo, monospace; line-height: 1.7;
+  }
+  #log b { color: #8fb3ff; font-weight: normal; }
+  .hint { font-size: 12px; color: #55648a; margin-top: 6px; }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <div id="wsdot" class="dot"></div>
+  <h1>AI 大促队长 · POC</h1>
+  <span id="modeBadge" class="badge">连接中…</span>
+  <span id="ttsBadge" class="badge">TTS: 未知</span>
+</header>
+<div style="padding:0 20px 12px;border-bottom:1px solid #1e2a4a;background:#0d1326;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+  <button id="pttBtn" style="background:#1f3c88;border:none;color:#fff;border-radius:8px;padding:12px 28px;font-size:16px;cursor:pointer;user-select:none" 
+    onmousedown="pttStart()" onmouseup="pttStop()" onmouseleave="pttStop()" ontouchstart="pttStart()" ontouchend="pttStop()">按住说话 (Space)</button>
+  <select id="modeSelect" onchange="setMode(this.value)" style="background:#0c1226;border:1px solid #2a3a63;color:#dbe4ff;border-radius:6px;padding:8px 10px">
+    <option value="ptt">PTT 按住说话</option>
+    <option value="voiceprint">声纹锁持续监听</option>
+    <option value="hybrid">声纹+唤醒词</option>
+  </select>
+  <span class="hint">声纹：<span id="vpStatus" style="color:#666">未启用</span></span>
+</div>
+
+
+<div class="grid">
+  <div>
+    <div class="card">
+      <div class="label">当前对话者（人脸识别）</div>
+      <div id="who">未识别</div>
+    </div>
+    <div class="card">
+      <div class="label">识别到的语音</div>
+      <div id="asr">…</div>
+    </div>
+    <div class="card">
+      <div class="label">队长播报</div>
+      <div id="subtitle">我是大促队长。点「开启感知」对我说话，或直接用文字问我。</div>
+    </div>
+    <div class="card">
+      <div class="row">
+        <input id="textInput" type="text" placeholder="小队长，当前支付成功率是多少？（回车发送）">
+        <button id="sendBtn">发送</button>
+      </div>
+      <div class="hint">可问：支付成功率 / GMV / 订单 / 在线人数 / 各组巡检进度 / 值班安排</div>
+    </div>
+  </div>
+
+  <div>
+    <div class="card">
+      <div class="label">感知设备（浏览器即传感器）</div>
+      <button id="startBtn">开启麦克风+摄像头</button>
+      <button id="hushBtn" class="danger" style="margin-left:6px">应急静音</button>
+      <div class="hint" id="permHint">未开启。建议办公室嘈杂场景先用 PTT 模式。</div>
+    </div>
+    <div class="card">
+      <div class="label">摄像头</div>
+      <video id="cam" autoplay muted playsinline></video>
+      <canvas id="shotCanvas" style="display:none"></canvas>
+    </div>
+    <div class="card">
+      <div class="label">人脸注册（对着镜头连拍 3 张）</div>
+      <div class="row">
+        <input id="nameInput" type="text" placeholder="你的名字，如：存孝">
+        <button id="regBtn">注册</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="label">麦克风波形</div>
+      <canvas id="wave"></canvas>
+    </div>
+    <div class="card">
+      <div class="label">事件日志</div>
+      <div id="log"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const log = (m) => {
+  const t = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+  $("log").innerHTML += `<div><b>${t}</b> ${m}</div>`;
+  $("log").scrollTop = 1e9;
+};
+
+let ws, ttsMode = "browser", pendingAudio = 0, currentAudio = null;
+let audioCtx, analyser, camStream, shotTimer = null;
+
+// ================= WebSocket =================
+function connect() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => { $("wsdot").classList.add("on"); $("modeBadge").textContent = "已连接"; log("WS 已连接"); };
+  ws.onclose = () => {
+    $("wsdot").classList.remove("on"); $("modeBadge").textContent = "已断开，3s 重连";
+    setTimeout(connect, 3000);
+  };
+  ws.onmessage = (ev) => {
+    if (typeof ev.data === "string") return onJson(JSON.parse(ev.data));
+    if (pendingAudio > 0) { playWav(ev.data); pendingAudio = 0; }
+  };
+}
+
+function onJson(d) {
+  log(`[${d.type}] ${d.text || d.name || d.mode || ""}`);
+  switch (d.type) {
+    case "tts_mode":
+      ttsMode = d.mode;
+      $("ttsBadge").textContent = d.mode === "server" ? "TTS: 服务端" : "TTS: 浏览器降级";
+      break;
+    case "asr":
+      $("asr").textContent = d.text;
+      break;
+    case "reply":
+      $("subtitle").textContent = d.text;
+      if (ttsMode === "browser") speakBrowser(d.text);
+      break;
+    case "identity":
+      $("who").textContent = d.name ? `${d.name}（相似度 ${d.score}）` : "未识别";
+      break;
+    case "audio":
+      pendingAudio = d.bytes;
+      break;
+    case "register_result":
+      log(d.ok ? `人脸注册成功：${d.name}` : `注册失败：${d.name}（没拍到脸？）`);
+      break;
+    case "hush":
+      hush();
+      break;
+  }
+}
+
+// ================= TTS 播放 =================
+function playWav(buf) {
+  const url = URL.createObjectURL(new Blob([buf], { type: "audio/wav" }));
+  if (currentAudio) currentAudio.pause();
+  currentAudio = new Audio(url);
+  currentAudio.play().catch((e) => log("播放失败: " + e));
+}
+function speakBrowser(text) {
+  speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = "zh-CN"; u.rate = 1.1;
+  speechSynthesis.speak(u);
+}
+function hush() {
+  speechSynthesis.cancel();
+  if (currentAudio) currentAudio.pause();
+  log("已静音");
+}
+
+// ================= 音频采集：48k -> 16k PCM16 =================
+async function startAudio(stream) {
+  audioCtx = new AudioContext();
+  const src = audioCtx.createMediaStreamSource(stream);
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 256;
+  src.connect(analyser);
+  drawWave();
+
+  const workletCode = `
+    class PCM extends AudioWorkletProcessor {
+      process(inputs) {
+        const ch = inputs[0][0];
+        if (ch) this.port.postMessage(ch.slice(0));
+        return true;
+      }
+    }
+    registerProcessor("pcm", PCM);`;
+  try {
+    await audioCtx.audioWorklet.addModule(
+      URL.createObjectURL(new Blob([workletCode], { type: "application/javascript" }))
+    );
+    const node = new AudioWorkletNode(audioCtx, "pcm");
+    node.port.onmessage = (e) => sendPcm(e.data);
+    src.connect(node);
+    node.connect(audioCtx.destination);
+  } catch (e) {
+    const sp = audioCtx.createScriptProcessor(2048, 1, 1);
+    sp.onaudioprocess = (ev) => sendPcm(ev.inputBuffer.getChannelData(0));
+    src.connect(sp);
+    sp.connect(audioCtx.destination);
+    log("AudioWorklet 不可用，已回退 ScriptProcessor");
+  }
+}
+
+function sendPcm(f32) {
+  if (!ws || ws.readyState !== 1) return;
+  if (currentMode === "ptt" && !pttActive) return;
+  const ratio = audioCtx.sampleRate / 16000;
+  const n = Math.floor(f32.length / ratio);
+  const out = new Int16Array(n);
+  for (let i = 0; i < n; i++) {
+    const s = Math.max(-1, Math.min(1, f32[Math.floor(i * ratio)]));
+    out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+  if (n > 0) ws.send(out.buffer);
+}
+
+function drawWave() {
+  const c = $("wave"), ctx = c.getContext("2d");
+  const buf = new Uint8Array(analyser.frequencyBinCount);
+  (function loop() {
+    requestAnimationFrame(loop);
+    c.width = c.clientWidth; c.height = c.clientHeight;
+    analyser.getByteTimeDomainData(buf);
+    ctx.clearRect(0, 0, c.width, c.height);
+    ctx.strokeStyle = "#2fdc7e"; ctx.beginPath();
+    buf.forEach((v, i) => {
+      const x = (i / buf.length) * c.width, y = (v / 255) * c.height;
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    });
+    ctx.stroke();
+  })();
+}
+
+// ================= 摄像头：2s 一张快照 =================
+function startCamera(stream) {
+  $("cam").srcObject = stream;
+  shotTimer = setInterval(() => {
+    const img = captureJpeg();
+    if (img && ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "shot", img }));
+  }, 2000);
+}
+
+function captureJpeg() {
+  const v = $("cam");
+  if (!v.videoWidth) return null;
+  const c = $("shotCanvas");
+  const w = 480, h = Math.round((v.videoHeight / v.videoWidth) * 480);
+  c.width = w; c.height = h;
+  c.getContext("2d").drawImage(v, 0, 0, w, h);
+  return c.toDataURL("image/jpeg", 0.7).split(",")[1];
+}
+
+let currentMode = "ptt", pttActive = false;
+
+function setMode(mode) {
+  currentMode = mode;
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "mode", mode }));
+  $("modeSelect").value = mode;
+  updatePttUi();
+}
+function updatePttUi() {
+  const btn = $("pttBtn");
+  if (currentMode === "ptt") { btn.style.display = "inline-block"; }
+  else { btn.style.display = "none"; pttStop(); }
+}
+
+function pttStart() {
+  if (currentMode !== "ptt" || pttActive) return;
+  pttActive = true;
+  $("pttBtn").style.background = "#2fdc7e";
+  $("subtitle").textContent = "正在听…";
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "ptt_start" }));
+}
+function pttStop() {
+  if (!pttActive) return;
+  pttActive = false;
+  $("pttBtn").style.background = "#1f3c88";
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "ptt_stop" }));
+}
+
+document.addEventListener("keydown", e => { if (e.code === "Space" && e.target.tagName !== "INPUT") { e.preventDefault(); pttStart(); } });
+document.addEventListener("keyup", e => { if (e.code === "Space" && e.target.tagName !== "INPUT") pttStop(); });
+
+// ================= 交互 =================
+$("startBtn").onclick = async () => {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true },
+      video: { width: 640, height: 480 },
+    });
+    camStream = stream;
+    await startAudio(stream);
+    startCamera(stream);
+    $("startBtn").disabled = true;
+    $("permHint").textContent = "感知已开启，可以说话了：小队长，当前支付成功率是多少？";
+  } catch (e) {
+    $("permHint").textContent = "授权失败：" + e.message + "（仍可文字对话）";
+  }
+};
+
+$("hushBtn").onclick = () => {
+  hush();
+  if (ws && ws.readyState === 1) fetch("/hush", { method: "POST" });
+};
+
+function sendText() {
+  const t = $("textInput").value.trim();
+  if (!t) return;
+  $("asr").textContent = t;
+  ws.send(JSON.stringify({ type: "text", text: t }));
+  $("textInput").value = "";
+}
+$("sendBtn").onclick = sendText;
+$("textInput").onkeydown = (e) => { if (e.key === "Enter") sendText(); };
+
+$("regBtn").onclick = async () => {
+  const name = $("nameInput").value.trim();
+  if (!name) return log("先填名字再注册");
+  if (!camStream) return log("先开启感知再注册");
+  const img = captureJpeg();
+  if (img) ws.send(JSON.stringify({ type: "register", name, img, pose: "front" }));
+  log(`注册快照 1/1 已发送；建议再到后台做 5 姿态完整注册`);
+};
+
+connect();
+</script>
+</body>
+</html>

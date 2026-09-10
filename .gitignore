@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# Local data / models / generated audio
+captain.db
+events.jsonl
+face_db.json
+voiceprint_db.json
+models/
+audio/
+*.wav
+
+# macOS
+.DS_Store
+
+# IDEs
+.vscode/
+.idea/
