@@ -96,7 +96,7 @@
             <option value="up">微仰</option>
             <option value="down">微俯</option>
           </select>
-          <button class="action" id="camBtn" onclick="startRegCam()">开启摄像头</button>
+          <button class="action" id="camBtn" onclick="toggleCam()">开启摄像头</button>
           <button class="action" onclick="captureFace()">拍照注册</button>
         </div>
         <video id="adminCam" autoplay muted playsinline></video>
@@ -107,9 +107,15 @@
       <div class="card">
         <div class="row">
           <select id="vpMember"></select>
-          <button class="action" id="vpBtn" onclick="recordVp()">按住录音</button>
+          <button class="action" id="vpBtn" style="touch-action:none;user-select:none">按住录音</button>
+          <span class="hint" id="vpTime"></span>
         </div>
-        <div class="hint">按住按钮读任意 2-3 秒中文，松开上传。系统只保存声纹向量。</div>
+        <div class="hint">按住按钮不松手，用正常音量念下面任一句（约 3 秒），松开自动上传。建议录 2-3 次，识别更稳。系统只保存声纹向量，不保存录音：<br>
+          <b style="color:#8fb3ff;font-size:14px">① 各位同事请注意，支付组巡检已完成，成功率保持平稳。</b><br>
+          <b style="color:#8fb3ff;font-size:14px">② 今天大促整体节奏正常，请各组继续按台本值守。</b><br>
+          <b style="color:#8fb3ff;font-size:14px">③ 风控和搜索组的预案演练都做完了，请知悉。</b>
+        </div>
+        <div class="hint" id="vpResult"></div>
       </div>
     </div>
 
@@ -138,6 +144,11 @@
             <option value="voiceprint">声纹锁持续监听</option>
             <option value="hybrid">声纹+唤醒词</option>
           </select>
+          <span class="hint">hybrid：说出唤醒词才会被识别</span>
+        </div>
+        <div class="row"><label>唤醒词</label>
+          <input id="sKws" placeholder="小队长（多个用逗号分隔）" onchange="saveSettings()"/>
+          <span class="hint">仅 hybrid 模式使用，需为纯中文词</span>
         </div>
         <div class="row"><label>声纹开关</label>
           <select id="sVp" onchange="saveSettings()">
@@ -154,11 +165,22 @@
         </div>
         <div class="row"><label>kokoro 音色</label>
           <select id="sVoice" onchange="saveSettings()">
-            <option value="af">af</option><option value="af_bella">af_bella</option><option value="af_nicole">af_nicole</option><option value="af_sky">af_sky</option>
-            <option value="am_adam">am_adam</option><option value="am_michael">am_michael</option><option value="bf_emma">bf_emma</option><option value="bf_isabella">bf_isabella</option>
+            <option value="zf_xiaoxiao">zf_xiaoxiao（中文女）</option>
+            <option value="zf_xiaobei">zf_xiaobei（中文女）</option>
+            <option value="zm_yunxi">zm_yunxi（中文男）</option>
+            <option value="zm_yunjian">zm_yunjian（中文男）</option>
+            <option value="af_bella">af_bella（英文女·自然）</option>
+            <option value="af_heart">af_heart（英文女）</option>
+            <option value="af_sky">af_sky（英文女）</option>
+            <option value="af_nicole">af_nicole（英文女）</option>
+            <option value="am_adam">am_adam（英文男）</option>
+            <option value="am_michael">am_michael（英文男）</option>
+            <option value="bf_emma">bf_emma（英式女）</option>
+            <option value="bm_george">bm_george（英式男）</option>
           </select>
         </div>
         <div class="row"><label>语速</label><input id="sSpeed" type="number" step="0.1" min="0.5" max="2" onchange="saveSettings()"/></div>
+        <div class="hint" id="sHint"></div>
       </div>
     </div>
 
@@ -297,6 +319,7 @@ function renderState() {
   $('ovIdentity').textContent = state.identity || '未识别';
   $('ovMode').textContent = state.audio_mode;
   $('ovVp').textContent = state.voiceprint_enabled ? '开' : '关';
+  updateSoundHint();
 }
 
 async function loadEvents() {
@@ -313,22 +336,50 @@ async function loadEvents() {
 async function loadSettings() {
   settings = await getJSON('/api/settings');
   $('sMode').value = settings.audio_mode || 'ptt';
+  $('sKws').value = settings.kws_keywords || '小队长';
   $('sVp').value = settings.voiceprint_enabled || 'false';
   $('sVpTh').value = settings.voiceprint_threshold || 0.55;
   $('sTts').value = settings.tts_engine || 'melo';
-  $('sVoice').value = settings.tts_kokoro_voice || 'af';
+  $('sVoice').value = settings.tts_kokoro_voice || 'af_bella';
+  if (!$('sVoice').value) $('sVoice').value = 'af_bella';  // 旧配置里的无效音色名回落
   $('sSpeed').value = settings.tts_speed || 1.0;
+  updateSoundHint();
 }
 async function saveSettings() {
-  await postJSON('/api/settings', {
+  const r = await postJSON('/api/settings', {
     audio_mode: $('sMode').value,
+    kws_keywords: $('sKws').value,
     voiceprint_enabled: $('sVp').value,
     voiceprint_threshold: $('sVpTh').value,
     tts_engine: $('sTts').value,
     tts_kokoro_voice: $('sVoice').value,
     tts_speed: $('sSpeed').value,
   });
-  loadState();
+  if (r && r.ok === false) {
+    $('sHint').textContent = '保存失败：' + (r.error || '未知错误');
+    $('sHint').style.color = '#ff7875';
+    return;
+  }
+  $('sHint').style.color = '';
+  await loadState();
+}
+function updateSoundHint() {
+  const modeNames = { ptt: 'PTT 按住说话', voiceprint: '声纹锁持续监听', hybrid: '声纹+唤醒词' };
+  const parts = [`收音：${modeNames[state.audio_mode] || state.audio_mode || '-'}`];
+  if (state.audio_mode === 'hybrid') {
+    parts.push(state.kws
+      ? `唤醒词生效：${state.kws_keywords || '未配置'}`
+      : '⚠ 唤醒词未生效（未配置或 kws 模型缺失），hybrid 退化为声纹监听');
+  }
+  if (state.tts_mode === 'server') {
+    parts.push(`TTS 实际生效：${state.tts_engine}${state.tts_engine === 'kokoro' ? ' · ' + (state.tts_voice || '') : ''}`);
+    if (($('sTts').value || 'melo') !== state.tts_engine) {
+      parts.push('⚠ 所选引擎加载失败，已自动回落');
+    }
+  } else {
+    parts.push('TTS：服务端不可用，前台浏览器语音');
+  }
+  $('sHint').textContent = parts.join(' · ');
 }
 
 function storeGet(k) { return settings[k] || ''; }
@@ -359,11 +410,23 @@ async function delMember(id) {
 }
 
 let regStream = null;
-async function startRegCam() {
-  regStream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
-  $('adminCam').srcObject = regStream;
-  $('camBtn').textContent = '已开启';
-  $('regHint').textContent = '摄像头已开启，选姿态后按「拍照注册」。';
+async function toggleCam() {
+  if (regStream) {
+    regStream.getTracks().forEach(t => t.stop());
+    regStream = null;
+    $('adminCam').srcObject = null;
+    $('camBtn').textContent = '开启摄像头';
+    $('regHint').textContent = '未开启摄像头';
+    return;
+  }
+  try {
+    regStream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+    $('adminCam').srcObject = regStream;
+    $('camBtn').textContent = '关闭摄像头';
+    $('regHint').textContent = '摄像头已开启，选姿态后按「拍照注册」。';
+  } catch (e) {
+    $('regHint').textContent = '摄像头开启失败：' + e.message;
+  }
 }
 function captureFace() {
   const v = $('adminCam');
@@ -380,32 +443,67 @@ function captureFace() {
   });
 }
 
-// voiceprint recording (simple PCM wav via ScriptProcessor)
-let vpCtx, vpRecorder, vpBuf = [];
+// voiceprint recording: pointerdown 开始 / pointerup 结束上传（16kHz 单声道 WAV）
+let vpCtx = null, vpStream = null, vpRec = null, vpBuf = [], vpTimer = null, vpT0 = 0;
+let vpStarting = false, vpPendingStop = false;
+
 async function recordVp() {
-  if (vpCtx) { stopVp(); return; }
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: 16000, channelCount: 1 } });
-  vpCtx = new AudioContext({ sampleRate: 16000 });
-  const src = vpCtx.createMediaStreamSource(stream);
-  vpRecorder = vpCtx.createScriptProcessor(4096, 1, 1);
-  vpBuf = [];
-  vpRecorder.onaudioprocess = e => {
-    const f = e.inputBuffer.getChannelData(0);
-    vpBuf.push(new Float32Array(f));
-  };
-  src.connect(vpRecorder);
-  vpRecorder.connect(vpCtx.destination);
-  $('vpBtn').textContent = '录音中…松开上传';
+  if (vpCtx || vpStarting) return;
+  vpStarting = true; vpPendingStop = false;
+  $('vpBtn').textContent = '启动中…';
+  try {
+    vpStream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: 16000, channelCount: 1 } });
+    vpCtx = new AudioContext({ sampleRate: 16000 });
+    const src = vpCtx.createMediaStreamSource(vpStream);
+    vpRec = vpCtx.createScriptProcessor(4096, 1, 1);
+    vpBuf = [];
+    vpRec.onaudioprocess = e => {
+      if (vpCtx) vpBuf.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+    };
+    src.connect(vpRec);
+    vpRec.connect(vpCtx.destination);
+    vpT0 = Date.now();
+    vpTimer = setInterval(() => { $('vpTime').textContent = ((Date.now() - vpT0) / 1000).toFixed(1) + 's'; }, 100);
+    $('vpBtn').textContent = '录音中…松开结束';
+    setTimeout(() => { if (vpCtx && Date.now() - vpT0 >= 9500) { $('vpResult').textContent = '已达 10 秒上限，自动停止'; stopVp(); } }, 10000);
+    if (vpPendingStop) stopVp();
+  } catch (e) {
+    resetVpUi();
+    $('vpResult').textContent = '麦克风开启失败：' + e.message;
+  } finally {
+    vpStarting = false;
+  }
 }
+
+function resetVpUi() {
+  if (vpTimer) { clearInterval(vpTimer); vpTimer = null; }
+  if (vpStream) { vpStream.getTracks().forEach(t => t.stop()); vpStream = null; }
+  if (vpCtx) { try { vpCtx.close(); } catch (e) {} vpCtx = null; }
+  vpRec = null; vpBuf = [];
+  $('vpBtn').textContent = '按住录音';
+  $('vpTime').textContent = '';
+}
+
 function stopVp() {
+  if (!vpCtx) return;
+  const srcRate = vpCtx.sampleRate;
   const total = vpBuf.reduce((a, b) => a + b.length, 0);
   const all = new Float32Array(total);
   let off = 0;
   vpBuf.forEach(b => { all.set(b, off); off += b.length; });
+  resetVpUi();
+  if (total === 0) { $('vpResult').textContent = '没录到声音，请重试'; return; }
+  // 重采样到 16k：浏览器实际采样率可能不是 16000，头里写死 16k 会毁掉声纹
+  let data = all;
+  if (srcRate !== 16000) {
+    const n = Math.round(total * 16000 / srcRate);
+    data = new Float32Array(n);
+    for (let i = 0; i < n; i++) data[i] = all[Math.floor(i * srcRate / 16000)] || 0;
+  }
   // encode wav
-  const samples = new Int16Array(all.length);
-  for (let i = 0; i < all.length; i++) {
-    const s = Math.max(-1, Math.min(1, all[i]));
+  const samples = new Int16Array(data.length);
+  for (let i = 0; i < data.length; i++) {
+    const s = Math.max(-1, Math.min(1, data[i]));
     samples[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
   }
   const buf = new ArrayBuffer(44 + samples.byteLength);
@@ -416,18 +514,27 @@ function stopVp() {
   v.setUint32(24, 16000, true); v.setUint32(28, 32000, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
   writeStr(36, 'data'); v.setUint32(40, samples.byteLength, true);
   for (let i=0;i<samples.length;i++) v.setInt16(44+i*2, samples[i], true);
-  const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
+  const b64 = u8ToB64(new Uint8Array(buf));
   const id = $('vpMember').selectedOptions[0].dataset.id;
+  $('vpResult').textContent = '上传中…';
   postJSON(`/api/members/${id}/voiceprint`, { wav: b64 }).then(r => {
-    $('vpBtn').textContent = '按住录音';
-    alert(r.ok ? '声纹注册成功' : `失败：${r.error || 'unknown'}`);
+    $('vpResult').textContent = r.ok
+      ? `声纹注册成功（已存 ${r.count}/5 条）${r.count < 3 ? '，建议再录 1-2 句更稳' : ''}`
+      : `失败：${r.error || 'unknown'}`;
     loadMembers();
-  });
-  vpCtx.close(); vpCtx = null; vpBuf = [];
+  }).catch(() => { $('vpResult').textContent = '上传失败，请重试'; });
 }
-$('vpBtn').addEventListener('mouseup', stopVp);
-$('vpBtn').addEventListener('mouseleave', stopVp);
-$('vpBtn').addEventListener('touchend', stopVp);
+
+// 分块 base64，避免长录音触发 String.fromCharCode 参数上限
+function u8ToB64(u8) {
+  let s = '';
+  for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+$('vpBtn').addEventListener('pointerdown', e => { e.preventDefault(); recordVp(); });
+$('vpBtn').addEventListener('pointerup', e => { e.preventDefault(); if (vpCtx) stopVp(); else vpPendingStop = true; });
+$('vpBtn').addEventListener('pointerleave', () => { if (vpCtx) stopVp(); });
+$('vpBtn').addEventListener('pointercancel', () => { if (vpCtx) stopVp(); });
 
 // roster
 async function loadRoster() {

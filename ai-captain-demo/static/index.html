@@ -80,6 +80,10 @@
       <div id="who">未识别</div>
     </div>
     <div class="card">
+      <div class="label">声纹识别（听声辨人）</div>
+      <div id="vpWho">未识别</div>
+    </div>
+    <div class="card">
       <div class="label">识别到的语音</div>
       <div id="asr">…</div>
     </div>
@@ -139,7 +143,7 @@ let audioCtx, analyser, camStream, shotTimer = null;
 
 // ================= WebSocket =================
 function connect() {
-  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
   ws.onopen = () => { $("wsdot").classList.add("on"); $("modeBadge").textContent = "已连接"; log("WS 已连接"); };
   ws.onclose = () => {
     $("wsdot").classList.remove("on"); $("modeBadge").textContent = "已断开，3s 重连";
@@ -154,6 +158,28 @@ function connect() {
 function onJson(d) {
   log(`[${d.type}] ${d.text || d.name || d.mode || ""}`);
   switch (d.type) {
+    case "config":
+      // 后台改了收音模式/声纹开关 → 前台热切换（不再回发，避免回环）
+      if (MODE_NAMES[d.audio_mode]) setMode(d.audio_mode, false);
+      log(`收音模式已同步：${MODE_NAMES[d.audio_mode] || d.audio_mode}${d.voiceprint_enabled ? "（声纹锁开）" : ""}`);
+      break;
+    case "wake":
+      if (d.status === "on") {
+        $("modeBadge").textContent = "已连接 · 已唤醒（请讲）";
+        log("已唤醒，10 秒内直接说话即可");
+      } else {
+        setMode(currentMode, false);
+        log("本轮对话结束，已回到唤醒待机");
+      }
+      break;
+    case "voiceprint":
+      if (d.status === "accepted") {
+        $("vpWho").textContent = d.name ? `${d.name}（相似度 ${d.score}）` : "未识别";
+        log(`声纹命中：${d.name}（相似度 ${d.score}）`);
+      } else {
+        log(`声纹未通过：相似度 ${d.score}，低于阈值，已忽略这段语音`);
+      }
+      break;
     case "tts_mode":
       ttsMode = d.mode;
       $("ttsBadge").textContent = d.mode === "server" ? "TTS: 服务端" : "TTS: 浏览器降级";
@@ -252,6 +278,7 @@ function drawWave() {
   const buf = new Uint8Array(analyser.frequencyBinCount);
   (function loop() {
     requestAnimationFrame(loop);
+    if (!audioCtx) return;
     c.width = c.clientWidth; c.height = c.clientHeight;
     analyser.getByteTimeDomainData(buf);
     ctx.clearRect(0, 0, c.width, c.height);
@@ -284,12 +311,16 @@ function captureJpeg() {
 }
 
 let currentMode = "ptt", pttActive = false;
+const MODE_NAMES = { ptt: "PTT", voiceprint: "声纹监听", hybrid: "唤醒词" };
 
-function setMode(mode) {
+function setMode(mode, notify = true) {
   currentMode = mode;
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "mode", mode }));
+  if (notify && ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "mode", mode }));
   $("modeSelect").value = mode;
   updatePttUi();
+  if (ws && ws.readyState === 1) {
+    $("modeBadge").textContent = "已连接 · " + (MODE_NAMES[mode] || mode);
+  }
 }
 function updatePttUi() {
   const btn = $("pttBtn");
@@ -316,6 +347,7 @@ document.addEventListener("keyup", e => { if (e.code === "Space" && e.target.tag
 
 // ================= 交互 =================
 $("startBtn").onclick = async () => {
+  if (camStream || audioCtx) return stopSense();
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true },
@@ -324,12 +356,23 @@ $("startBtn").onclick = async () => {
     camStream = stream;
     await startAudio(stream);
     startCamera(stream);
-    $("startBtn").disabled = true;
+    $("startBtn").textContent = "关闭麦克风+摄像头";
     $("permHint").textContent = "感知已开启，可以说话了：小队长，当前支付成功率是多少？";
   } catch (e) {
     $("permHint").textContent = "授权失败：" + e.message + "（仍可文字对话）";
   }
 };
+
+function stopSense() {
+  if (camStream) { camStream.getTracks().forEach(t => t.stop()); camStream = null; }
+  if (shotTimer) { clearInterval(shotTimer); shotTimer = null; }
+  if (audioCtx) { try { audioCtx.close(); } catch (e) {} audioCtx = null; }
+  $("cam").srcObject = null;
+  pttActive = false;
+  hush();
+  $("startBtn").textContent = "开启麦克风+摄像头";
+  $("permHint").textContent = "感知已关闭，点击重新开启。";
+}
 
 $("hushBtn").onclick = () => {
   hush();
@@ -356,6 +399,25 @@ $("regBtn").onclick = async () => {
 };
 
 connect();
+
+// ================= 播报打断（barge-in）=================
+// 队长说话时你开口，立即暂停播报，唤醒词/语音才不会被自己的 TTS 盖住
+let bargeCount = 0;
+setInterval(() => {
+  if (!analyser || !currentAudio || currentAudio.paused) { bargeCount = 0; return; }
+  const buf = new Uint8Array(analyser.fftSize);
+  analyser.getByteTimeDomainData(buf);
+  let sum = 0;
+  for (let i = 0; i < buf.length; i++) { const v = (buf[i] - 128) / 128; sum += v * v; }
+  const rms = Math.sqrt(sum / buf.length);
+  if (rms > 0.12) bargeCount++; else bargeCount = 0;
+  if (bargeCount >= 5) {  // 连续约 0.5s 检测到人声才打断，避免回声误触
+    currentAudio.pause();
+    currentAudio = null;
+    bargeCount = 0;
+    log("检测到你在说话，已暂停播报");
+  }
+}, 100);
 </script>
 </body>
 </html>

@@ -37,7 +37,7 @@ brain = Brain()
 voiceprint = VoiceprintGate()
 face_pipe = FacePipe()
 tts_pipe = TtsPipe()
-kws_gate = KwsGate()
+_kws_gate: KwsGate | None = None
 
 clients: set[WebSocket] = set()
 EVENTS_FILE = ROOT / "events.jsonl"
@@ -65,6 +65,10 @@ def _seed_if_empty():
 
 
 _seed_if_empty()
+
+# 唤醒词默认值：hybrid 模式开箱即用
+if not store.get("kws_keywords"):
+    store.set("kws_keywords", "小队长")
 
 
 # --------------------------------------------------------------------------- helpers
@@ -103,16 +107,31 @@ def get_tts_pipe() -> TtsPipe:
     return _tts_handle["pipe"]
 
 
+def get_kws_gate() -> KwsGate:
+    """唤醒词配置变更时重建 KeywordSpotter。"""
+    global _kws_gate
+    kw = store.get("kws_keywords", "")
+    if _kws_gate is None or _kws_gate.keywords_source != kw:
+        _kws_gate = KwsGate(kw)
+        _kws_gate.keywords_source = kw
+    return _kws_gate
+
+
 def get_continuous_pipe() -> AudioPipe:
     mode, vp_enabled, threshold = current_audio_config()
+    kws = get_kws_gate()
     vp_required = mode in ("voiceprint", "hybrid") and vp_enabled and bool(voiceprint._avg)
-    cfg = (mode, vp_enabled, threshold)
+    kws_required = mode == "hybrid" and kws.ok
+    cfg = (mode, vp_enabled, threshold, kws.keywords_source if kws else "")
     if _audio_handle["pipe"] is None or _audio_handle["cfg"] != cfg:
-        pipe = AudioPipe(voiceprint, vp_required, threshold)
+        pipe = AudioPipe(voiceprint, vp_required, threshold, kws_gate=kws, kws_required=kws_required)
         pipe._rejected_signal = lambda samples, score, name: _notify_voiceprint_rejected(score, name)
+        pipe._accepted_signal = lambda samples, score, name: _notify_voiceprint_accepted(score, name)
+        pipe._is_awake = lambda: time.time() < _wake_until
+        pipe._wake_signal = lambda: _on_wake_detected()
         _audio_handle["pipe"] = pipe
         _audio_handle["cfg"] = cfg
-        print(f"[server] 连续监听管道重建: mode={mode} vp={vp_enabled} threshold={threshold}")
+        print(f"[server] 连续监听管道重建: mode={mode} vp={vp_enabled} threshold={threshold} kws={kws_required}")
     return _audio_handle["pipe"]
 
 
@@ -132,12 +151,70 @@ async def broadcast_audio(text: str):
 
 
 def _notify_voiceprint_rejected(score: float, name: str | None):
+    log_event("voiceprint", {"type": "rejected", "score": round(score, 3), "name": name})
     if _event_loop is None:
         return
     asyncio.run_coroutine_threadsafe(
         broadcast({"type": "voiceprint", "status": "rejected", "score": round(score, 3), "name": name}),
         _event_loop,
     )
+
+
+# 最近一次声纹放行命中的说话人（含新鲜度，供「我是谁」用例使用）
+VP_SPEAKER_TTL = 300  # 秒
+_vp_speaker = {"name": None, "ts": 0.0, "score": 0.0}
+
+# 唤醒窗口：唤醒后 N 秒内的语音无需再喊唤醒词
+WAKE_WINDOW = 10.0
+_wake_until = 0.0
+
+
+def _notify_voiceprint_accepted(score: float, name: str | None):
+    if name:
+        _vp_speaker["name"], _vp_speaker["ts"], _vp_speaker["score"] = name, time.time(), score
+        if _event_loop is not None:
+            asyncio.run_coroutine_threadsafe(
+                broadcast({"type": "voiceprint", "status": "accepted", "score": round(score, 3), "name": name}),
+                _event_loop,
+            )
+
+
+def _on_wake_detected():
+    """纯唤醒段命中（worker 线程回调）：开窗 + 应答「我在，请讲」。"""
+    global _wake_until
+    _wake_until = time.time() + WAKE_WINDOW
+    log_event("wake", {"type": "on"})
+    if _event_loop is not None:
+        asyncio.run_coroutine_threadsafe(_broadcast_wake_ack(), _event_loop)
+
+
+_ack_cache: dict = {"cfg": None, "wav": None}
+
+
+async def _broadcast_wake_ack():
+    await broadcast({"type": "wake", "status": "on"})
+    cfg = _tts_handle["cfg"]
+    if _ack_cache["cfg"] != cfg or not _ack_cache["wav"]:
+        pipe = get_tts_pipe()
+        if not pipe.ok:
+            return
+        _ack_cache["wav"] = await asyncio.to_thread(pipe.synth, "我在，请讲。")
+        _ack_cache["cfg"] = cfg
+    wav = _ack_cache["wav"]
+    if not wav:
+        return
+    for ws in list(clients):
+        try:
+            await ws.send_json({"type": "audio", "bytes": len(wav)})
+            await ws.send_bytes(wav)
+        except Exception:
+            clients.discard(ws)
+
+
+def current_voice_name() -> str | None:
+    if time.time() - _vp_speaker["ts"] > VP_SPEAKER_TTL:
+        return None
+    return _vp_speaker["name"]
 
 
 def current_audio_config() -> tuple[str, bool, float]:
@@ -279,7 +356,8 @@ async def api_state():
         "asr": get_continuous_pipe().ok,
         "voiceprint": voiceprint.ok,
         "voiceprint_enabled": vp_enabled,
-        "kws": kws_gate.ok,
+        "kws": get_kws_gate().ok,
+        "kws_keywords": store.get("kws_keywords", ""),
         "voiceprint_registered": list(voiceprint.db.keys()),
         "face": face_pipe.ok,
         "registered_faces": list(face_pipe.db.keys()),
@@ -326,8 +404,19 @@ async def api_settings():
 
 @app.post("/api/settings")
 async def api_settings_update(payload: dict):
+    # 唤醒词先验证再落库（需能转成拼音 token 且 kws 模型可用）
+    if "kws_keywords" in payload:
+        probe = KwsGate(str(payload["kws_keywords"] or ""))
+        probe.keywords_source = str(payload["kws_keywords"] or "")
+        if str(payload["kws_keywords"] or "").strip() and not probe.ok:
+            return {"ok": False, "error": "唤醒词无效：需为纯中文词（可多个，逗号分隔），且 kws 模型已下载"}
     for k, v in payload.items():
         store.set(k, v)
+    # 重建受影响管道，并广播给所有已连接前台，让收音模式/TTS 热生效
+    pipe = get_tts_pipe()
+    await broadcast({"type": "tts_mode", "mode": "server" if pipe.ok else "browser", "engine": pipe.engine})
+    mode, vp_enabled, _ = current_audio_config()
+    await broadcast({"type": "config", "audio_mode": mode, "voiceprint_enabled": vp_enabled})
     return {"ok": True, "revision": store.revision()}
 
 
@@ -662,6 +751,11 @@ async def _handle_audio(_ws, state: dict, pcm16: bytes):
     texts = await asyncio.to_thread(get_continuous_pipe().feed, pcm16)
     for text in texts:
         await handle_user_text(text, source="asr")
+    if texts and state["mode"] == "hybrid":
+        # 单轮对话：回答完即关窗，下次说话需重新唤醒
+        global _wake_until
+        _wake_until = 0.0
+        await broadcast({"type": "wake", "status": "off"})
 
 
 async def _handle_ptt_start(state: dict):
@@ -704,7 +798,7 @@ async def handle_user_text(text: str, source: str):
     log_event("user", {"source": source, "text": text, "identity": tracker.current})
     if source == "asr":
         await broadcast({"type": "asr", "text": text})
-    reply = await asyncio.to_thread(brain.respond, text, tracker.current)
+    reply = await asyncio.to_thread(brain.respond, text, tracker.current, current_voice_name())
     await broadcast({"type": "reply", "text": reply, "person": tracker.current})
     await broadcast_audio(reply)
 

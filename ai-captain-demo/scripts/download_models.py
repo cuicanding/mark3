@@ -19,6 +19,7 @@ PROXIES = ["https://ghfast.top/", "https://gh-proxy.com/", ""]
 ASR_TAR = ("asr-models", "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17")
 TTS_TAR = ("tts-models", "vits-melo-tts-zh_en")
 KOKORO_TAR = ("tts-models", "kokoro-multi-lang-v1_0")
+KWS_TAR = ("kws-models", "sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01")
 SPEAKER_MODEL = "wespeaker_zh_cnceleb_resnet34.onnx"
 
 
@@ -63,7 +64,8 @@ def fetch_release_tar(tag: str, name: str, dest_dir: Path):
 
 def fetch_speaker_model(dest_dir: Path):
     dest_dir.mkdir(parents=True, exist_ok=True)
-    url = f"{GH}/k2-fsa/sherpa-onnx/releases/download/speaker-recognition-models/{SPEAKER_MODEL}"
+    # 上游 release tag 本身拼写为 recongition（缺 i），不是 recognition
+    url = f"{GH}/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/{SPEAKER_MODEL}"
     ok = curl(url, dest_dir / SPEAKER_MODEL)
     if not ok:
         raise SystemExit(f"下载失败: {SPEAKER_MODEL}")
@@ -82,6 +84,9 @@ def main():
     if only in ("all", "tts_kokoro"):
         fetch_release_tar(*KOKORO_TAR, M / "tts_kokoro")
         assert (M / "tts_kokoro" / "model.onnx").exists(), "kokoro 模型缺失"
+    if only in ("all", "kws"):
+        fetch_release_tar(*KWS_TAR, M / "kws")
+        assert (M / "kws" / "encoder-epoch-12-avg-2-chunk-16-left-64.onnx").exists(), "kws 模型缺失"
     if only in ("all", "vad"):
         ok = curl(f"{GH}/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx",
                   M / "vad" / "silero_vad.onnx")

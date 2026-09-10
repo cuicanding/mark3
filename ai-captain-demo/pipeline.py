@@ -11,6 +11,7 @@ import io
 import json
 import os
 import re
+import time
 import wave
 
 import numpy as np
@@ -46,13 +47,19 @@ class AudioPipe:
 
     WINDOW = 512  # 32ms @16k
 
-    def __init__(self, voiceprint_gate=None, voiceprint_required=False, voiceprint_threshold=0.55):
+    def __init__(self, voiceprint_gate=None, voiceprint_required=False, voiceprint_threshold=0.55,
+                 kws_gate=None, kws_required=False):
         self.ok = False
         self._pending = np.zeros(0, dtype=np.float32)
         self._voiceprint_gate = voiceprint_gate
         self._voiceprint_required = voiceprint_required
         self._voiceprint_threshold = voiceprint_threshold
         self._rejected_signal = None  # 调用方可设置 cb(samples, score, name)
+        self._accepted_signal = None  # 调用方可设置 cb(samples, score, name)：声纹放行时带上命中人
+        self._kws_gate = kws_gate
+        self._kws_required = kws_required  # hybrid 模式：需唤醒词
+        self._is_awake = None  # 调用方注入 cb() -> bool：唤醒窗口是否打开
+        self._wake_signal = None  # 调用方注入 cb()：命中纯唤醒词时回调（应答+开窗）
         if MOCK:
             print("[AudioPipe] MOCK 模式，语音输入关闭，用页面文字输入")
             return
@@ -116,6 +123,24 @@ class AudioPipe:
             if len(samples) == 0:
                 continue
 
+            # 唤醒词状态机（hybrid）：
+            #   未唤醒：段落须命中唤醒词；短段=纯唤醒 → 回调应答+开窗；长段=命令直接识别
+            #   已唤醒：短段若是再次唤醒则刷新窗口；其余直接进入识别
+            if self._kws_required and self._kws_gate:
+                awake = bool(self._is_awake and self._is_awake())
+                short = len(samples) < 16000 * 2.0
+                if not awake:
+                    if not self._kws_gate.detect(samples):
+                        continue
+                    if short:
+                        if self._wake_signal:
+                            self._wake_signal()
+                        continue
+                elif short and self._kws_gate.detect(samples):
+                    if self._wake_signal:
+                        self._wake_signal()
+                    continue
+
             # 声纹门控：连续监听模式下只放行已注册说话人
             if self._voiceprint_required and self._voiceprint_gate and self._voiceprint_gate.ok and self._voiceprint_gate._avg:
                 ok, score, name = self._voiceprint_gate.verify(samples, self._voiceprint_threshold)
@@ -123,6 +148,8 @@ class AudioPipe:
                     if self._rejected_signal:
                         self._rejected_signal(samples, score, name)
                     continue
+                if self._accepted_signal:
+                    self._accepted_signal(samples, score, name)
 
             text = self._decode(samples)
             if text:
@@ -199,12 +226,17 @@ class VoiceprintGate:
         stream = self.extractor.create_stream()
         stream.accept_waveform(16000, samples)
         stream.input_finished()
-        # 等待模型 ready
+        # 等待模型 ready；设上限防止异常段死循环占满 CPU
+        waited = 0
         while not self.extractor.is_ready(stream):
-            pass
+            time.sleep(0.01)
+            waited += 1
+            if waited > 200:  # 约 2s 仍未就绪，放弃本次提取
+                return None
+        # 注意：1.13.x 的 SpeakerEmbeddingExtractor 没有 release_stream，stream 交给 GC
+        # compute() 返回 list[float]，需转 ndarray
         embedding = self.extractor.compute(stream)
-        self.extractor.release_stream(stream)
-        return _norm(embedding.flatten())
+        return _norm(np.asarray(embedding, dtype=np.float32).flatten())
 
     def register(self, samples: np.ndarray, name: str) -> bool:
         if not self.ok or not name:
@@ -239,32 +271,104 @@ class VoiceprintGate:
 # KWS 唤醒词门控（P3 占位）
 # ---------------------------------------------------------------------------
 class KwsGate:
-    """关键词唤醒（小队长）。模型到位后启用，hybrid 模式下作为唤醒触发器。"""
+    """关键词唤醒（hybrid 模式）：sherpa-onnx KeywordSpotter + wenetspeech zipformer。
+    keywords 为逗号/顿号分隔的中文唤醒词（配置项 kws_keywords），空则不启用。"""
 
-    def __init__(self):
+    KW_DIR = f"{MODELS}/kws"
+
+    def __init__(self, keywords: str = ""):
         self.ok = False
-        if MOCK:
-            print("[KwsGate] MOCK 模式，KWS 关闭")
+        self.keywords = [k.strip() for k in re.split(r"[,，、/]", keywords or "") if k.strip()]
+        if MOCK or not self.keywords:
             return
-        model = Path(f"{MODELS}/kws/model.onnx")
-        if not model.exists():
-            print("[KwsGate] 未检测到 kws 模型，关闭")
+        d = self.KW_DIR
+        enc = f"{d}/encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx"
+        dec = f"{d}/decoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx"
+        join = f"{d}/joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx"
+        tokens_path = f"{d}/tokens.txt"
+        if not all(Path(p).exists() for p in (enc, dec, join, tokens_path)):
+            print("[KwsGate] 未检测到 kws 模型，先跑 scripts/download_models.py kws")
             return
         try:
-            # TODO: 接入 sherpa-onnx KeywordSpotter（zipformer-wenetspeech + keywords_file）
-            self.ok = False
+            valid = self._load_tokens(tokens_path)
+            lines = []
+            for kw in self.keywords:
+                toks = self._kw_tokens(kw, valid)
+                if toks is None:
+                    print(f"[KwsGate] 唤醒词无法转成拼音 token，跳过: {kw}")
+                    continue
+                lines.append(" ".join(toks) + f" @{kw}")
+            if not lines:
+                print("[KwsGate] 没有有效唤醒词，关闭")
+                return
+            kwfile = Path(d) / "keywords_custom.txt"
+            kwfile.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+            import sherpa_onnx
+
+            self.kws = sherpa_onnx.KeywordSpotter(
+                tokens=tokens_path, encoder=enc, decoder=dec, joiner=join,
+                keywords_file=str(kwfile), num_threads=1, provider="cpu",
+            )
+            self.ok = True
+            print(f"[KwsGate] 唤醒词就绪: {self.keywords}")
         except Exception as e:
             print(f"[KwsGate] 初始化失败: {e}")
 
-    def feed(self, pcm16: bytes) -> bool:
-        """喂 PCM16 音频，返回是否检测到唤醒词。"""
+    @staticmethod
+    def _load_tokens(path: str) -> set[str]:
+        with open(path, encoding="utf-8") as f:
+            return {line.split()[0] for line in f if line.strip()}
+
+    @staticmethod
+    def _kw_tokens(word: str, valid: set[str]) -> list[str] | None:
+        """汉字 → 拼音声母+带调韵母 token 序列；出现未知 token 返回 None。"""
+        from pypinyin import lazy_pinyin, Style
+
+        syls = lazy_pinyin(word, style=Style.TONE)
+        inis = lazy_pinyin(word, style=Style.INITIALS, strict=False)
+        toks: list[str] = []
+        for s, i in zip(syls, inis):
+            for part in ([i] if i else []) + [s[len(i):]]:
+                if part not in valid:
+                    return None
+                toks.append(part)
+        return toks or None
+
+    def detect(self, samples: np.ndarray) -> bool:
+        """一段 VAD 切出的音频是否命中任一唤醒词。
+        注意：get_result 是瞬态的，必须在解码循环内检查（官方示例同款写法）；
+        结尾补 0.66s 静音让 keyword 边界得以封口。"""
         if not self.ok:
             return False
-        # TODO: 实现 KeywordSpotter 流式检测
+        stream = self.kws.create_stream()
+        stream.accept_waveform(16000, samples)
+        stream.accept_waveform(16000, np.zeros(int(16000 * 0.66), dtype=np.float32))
+        stream.input_finished()
+        while self.kws.is_ready(stream):
+            self.kws.decode_stream(stream)
+            if self.kws.get_result(stream):
+                return True
         return False
 
 class TtsPipe:
     """vits-melo / kokoro 双档 TTS。模型缺失时 ok=False，由前端降级浏览器语音。"""
+
+    # kokoro v1.0 voices.bin 的音色名 → sid（取自 model.onnx 元数据 speaker2id）
+    KOKORO_VOICE2ID = {
+        "af_alloy": 0, "af_aoede": 1, "af_bella": 2, "af_heart": 3, "af_jessica": 4,
+        "af_kore": 5, "af_nicole": 6, "af_nova": 7, "af_river": 8, "af_sarah": 9,
+        "af_sky": 10, "am_adam": 11, "am_echo": 12, "am_eric": 13, "am_fenrir": 14,
+        "am_liam": 15, "am_michael": 16, "am_onyx": 17, "am_puck": 18, "am_santa": 19,
+        "bf_alice": 20, "bf_emma": 21, "bf_isabella": 22, "bf_lily": 23, "bm_daniel": 24,
+        "bm_fable": 25, "bm_george": 26, "bm_lewis": 27, "ef_dora": 28, "em_alex": 29,
+        "ff_siwis": 30, "hf_alpha": 31, "hf_beta": 32, "hm_omega": 33, "hm_psi": 34,
+        "if_sara": 35, "im_nicola": 36, "jf_alpha": 37, "jf_gongitsune": 38,
+        "jf_nezumi": 39, "jf_tebukuro": 40, "jm_kumo": 41, "pf_dora": 42,
+        "pm_alex": 43, "pm_santa": 44, "zf_xiaobei": 45, "zf_xiaoni": 46,
+        "zf_xiaoxiao": 47, "zf_xiaoyi": 48, "zm_yunjian": 49, "zm_yunxi": 50,
+        "zm_yunxia": 51, "zm_yunyang": 52, "em_santa": 53,
+    }
 
     def __init__(self, engine: str = "melo", voice: str | None = None, speed: float = 1.0):
         self.ok = False
@@ -287,15 +391,18 @@ class TtsPipe:
                 engine = "melo"
             else:
                 try:
-                    voices_path = f"{d}/voices.json" if (Path(d) / "voices.json").exists() else ""
-                    data_dir = f"{d}"
-                    if (Path(d) / "data").exists():
-                        data_dir = f"{d}/data"
+                    # voices.bin 是 v1.0 发布包的实际文件名（不是 voices.json）
+                    voices_path = f"{d}/voices.bin" if (Path(d) / "voices.bin").exists() else ""
+                    data_dir = f"{d}/espeak-ng-data" if (Path(d) / "espeak-ng-data").exists() else f"{d}"
+                    lexicon = ",".join(
+                        p for p in (f"{d}/lexicon-zh.txt", f"{d}/lexicon-us-en.txt")
+                        if Path(p).exists()
+                    )
                     kokoro = sherpa_onnx.OfflineTtsKokoroModelConfig(
                         model=f"{d}/model.onnx",
                         voices=voices_path,
                         tokens=f"{d}/tokens.txt",
-                        lexicon=f"{d}/lexicon.txt" if (Path(d) / "lexicon.txt").exists() else "",
+                        lexicon=lexicon,
                         data_dir=data_dir,
                     )
                     cfg = sherpa_onnx.OfflineTtsConfig(
@@ -306,7 +413,10 @@ class TtsPipe:
                         raise RuntimeError("kokoro 配置校验失败")
                     self.tts = sherpa_onnx.OfflineTts(cfg)
                     self.engine = "kokoro"
-                    self.voice = voice or "af"
+                    # 新版 sherpa-onnx 去掉了 voice= 参数，音色用 sid 索引（见 KOKORO_VOICE2ID）
+                    if voice not in self.KOKORO_VOICE2ID:
+                        voice = "af_alloy"
+                    self.voice = voice
                     self.ok = True
                     print(f"[TtsPipe] kokoro 就绪 (voice={self.voice})")
                     return
@@ -347,7 +457,9 @@ class TtsPipe:
         for s in sentences:
             try:
                 if self.engine == "kokoro":
-                    audio = self.tts.generate(s, sid=0, speed=self.speed, voice=self.voice)
+                    audio = self.tts.generate(
+                        s, sid=self.KOKORO_VOICE2ID.get(self.voice, 0), speed=self.speed
+                    )
                 else:
                     audio = self.tts.generate(s, sid=self.sid, speed=self.speed)
             except TypeError:

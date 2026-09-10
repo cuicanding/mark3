@@ -7,3 +7,4 @@ sherpa-onnx
 huggingface_hub
 apscheduler
 openai
+pypinyin

@@ -102,6 +102,7 @@ class Brain:
             (re.compile(r"订单"), self._orders),
             (re.compile(r"流量|在线|uv|pv|人数", re.I), self._online),
             (re.compile(r"巡检|预案|任务|值班|进度|到哪|排班"), self._duty),
+            (re.compile(r"我是谁|我是哪个|认识我吗|你知道我是谁|认出我|记得我"), self._who_this),
             (re.compile(r"你是谁|自我介绍|介绍一下"), self._whoami),
             (re.compile(r"你好|您好|早上好|下午好|晚上好|在吗|在不在|^早$"), self._hello),
             (re.compile(r"谢谢|辛苦"), self._thanks),
@@ -133,9 +134,8 @@ class Brain:
     # ------------------------------------------------------------------
     # 对外 API
     # ------------------------------------------------------------------
-    def respond(self, text: str, identity: str | None = None) -> str:
-        text = (text or "").strip()
-        WAKE.sub("", text).strip()
+    def respond(self, text: str, identity: str | None = None, voice_name: str | None = None) -> str:
+        text = WAKE.sub("", (text or "").strip()).strip()
 
         self.metrics.walk()
         # 1) 后台管理的可编辑意图规则优先
@@ -150,7 +150,10 @@ class Brain:
             # 2) 代码内置复杂规则
             for pattern, handler in self.rules:
                 if pattern.search(text):
-                    result = handler(text, identity)
+                    try:
+                        result = handler(text, identity, voice_name)
+                    except TypeError:
+                        result = handler(text, identity)
                     break
             else:
                 # 3) LLM 薄循环兜底
@@ -253,6 +256,25 @@ class Brain:
 
     def _whoami(self, text, identity):
         return {"template": "{identity}，我是大促队长，作战室的 AI 值班员。可以问我支付成功率、GMV、各组巡检进度和值班安排。", "data": {}}
+
+    def _time_greeting(self) -> str:
+        hour = time.localtime().tm_hour
+        return "早上好" if hour < 9 else "上午好" if hour < 12 else "下午好" if hour < 18 else "晚上好"
+
+    def _who_this(self, text, identity, voice_name=None):
+        """「我是谁」用例：报身份 + 认出方式 + 小问候。"""
+        greet = self._time_greeting()
+        if identity and voice_name == identity:
+            return (f"{identity}，{greet}！摄像头的人脸和您刚才的声纹都对上了，我确定是您。"
+                    f"指标都在水位上，有事随时叫我。")
+        if identity:
+            return (f"{identity}，{greet}！我是通过摄像头人脸识别认出您的。"
+                    f"欢迎回来，要听指标还是巡检进度？")
+        if voice_name:
+            return (f"{voice_name}，{greet}！我是通过声纹听出是您的——您的声音就是通行证。"
+                    f"走到镜头前我还能用人脸再确认一次。")
+        return ("暂时还没认出您。请让管理员在后台「人员」页给您注册人脸，"
+                "或对着麦克风念一段声纹注册口令，我就能叫出您的名字啦。")
 
     def _hello(self, text, identity):
         if identity:
